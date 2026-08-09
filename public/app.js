@@ -183,7 +183,7 @@ function renderGrid(products) {
         <span>库存 ${p.available_count}</span>
         <span>已售 ${p.sold_count}</span>
       </div>
-      <canvas class="spark" data-id="${p.id}"></canvas>
+      <div class="spark-wrap"><canvas class="spark" data-id="${p.id}"></canvas></div>
       ${tag}
     `;
     el.addEventListener('click', () => openModal(p));
@@ -315,9 +315,10 @@ function renderStatus(st) {
 // ---- 汇总加载 ----
 async function refresh() {
   try {
-    const [r, br] = await Promise.all([
+    const [r, br, st] = await Promise.all([
       api('/api/current'),
       api('/api/board').catch(() => ({ board: [] })),
+      api('/api/status').catch(() => ({})),
     ]);
     const prev = new Map(productsCache.map((p) => [p.id, p.price_cents]));
     for (const p of r.products) {
@@ -330,7 +331,7 @@ async function refresh() {
     productsCache = r.products;
     renderGrid(r.products);
     renderBoard(br.board || []);
-    renderStatus(r);
+    renderStatus(st);
   } catch (e) {
     if (e && e.api401) {
       localStorage.removeItem(TOKEN_KEY);
