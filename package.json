@@ -1,0 +1,20 @@
+{
+  "name": "nvt-monitor",
+  "version": "1.0.0",
+  "description": "NVT 号池交易台商品价格监控平台",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "refresh-cookie": "node refresh-cookie.js",
+    "collect-once": "node -e \"require('./collector').runOnce().then(r=>{console.log('[collect] total='+r.total+' changed='+r.changed);process.exit(0)}).catch(e=>{console.error('[collect] FAIL',e.message);process.exit(1)})\""
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.10.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "undici": "^6.28.0"
+  },
+  "devDependencies": {
+    "playwright": "^1.62.1"
+  }
+}
