@@ -116,8 +116,14 @@ server {
 - `GET /api/board/history?plan=plus&window=6` — 只返回最近 6 小时的数据（分时走势用）
 - `GET /api/board/history?plan=plus&from_ts=2026-08-09 00:00:00&to_ts=2026-08-09 23:59:59&limit=50000` — 按时间范围分页（K 线「拖动加载更早历史」用，`from_ts`/`to_ts` 为 UTC 字符串）
 - `GET /api/board/events?limit=50` — 面板价格/现货变化事件
+- `GET /api/merchants` — 商家排行榜（转发 merchant-rankings，5 分钟缓存），含各商家分计划价格/活跃率/销量
 - `GET /api/status` — 采集状态（最近轮询、cookie 是否失效）
 - 所有 API 需带请求头 `x-auth-token: <sha256("nvt:"+WEB_PASSWORD)>`（看板前端会自动计算）
+
+## 大盘指数与商家排行榜
+
+- **大盘指数**（看板顶部）：各计划中位价**等权平均**的综合指数 + 近 6 小时迷你走势，实时反映号池整体价格水平
+- **商家排行榜**（顶部 tab）：展示各商家排名、Plus 最低价、活跃率、总销量、在售数，**点击表头排序**。数据来自 merchant-rankings，5 分钟缓存
 
 ## 分时走势面板
 

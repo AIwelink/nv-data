@@ -332,6 +332,7 @@ async function refresh() {
     renderGrid(r.products);
     renderBoard(br.board || []);
     renderStatus(st);
+    renderIndex(); // 大盘指数（异步，不阻塞刷新）
   } catch (e) {
     if (e && e.api401) {
       localStorage.removeItem(TOKEN_KEY);
@@ -507,12 +508,134 @@ function switchTab(tab) {
   document.querySelectorAll('.tab-btn').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
   $('#tab-overview').style.display = tab === 'overview' ? '' : 'none';
   $('#tab-chart').style.display = tab === 'chart' ? '' : 'none';
+  $('#tab-rank').style.display = tab === 'rank' ? '' : 'none';
   if (tab === 'chart') {
     initCharts();
     if (!chartTimer) {
       chartTimer = setInterval(() => updateCharts(), 20000);
     }
+  } else if (tab === 'rank') {
+    loadRank();
   }
+}
+
+// ---- 大盘指数 ----
+let indexChart = null;
+async function renderIndex() {
+  try {
+    const r = await api('/api/board');
+    const plans = (r.board || []).filter((p) => p.available && p.median_cents > 0);
+    if (!plans.length) { $('#index-card').style.display = 'none'; return; }
+    $('#index-card').style.display = 'block';
+    // 当前指数 = 等权平均各 plan 中位价
+    const cur = plans.reduce((s, p) => s + p.median_cents, 0) / plans.length;
+    // 历史指数：拉各 plan 近 6h，按 5min 桶聚合各 plan 中位价平均
+    const histArr = await Promise.all(plans.map((p) =>
+      api('/api/board/history?plan=' + encodeURIComponent(p.plan) + '&window=6')
+        .then((d) => (d.history || []).filter((h) => h.available && h.median_cents > 0))
+        .catch(() => [])
+    ));
+    const bucket = new Map();
+    for (let i = 0; i < plans.length; i++) {
+      for (const h of histArr[i]) {
+        const ms = capturedAtToMs(h.captured_at);
+        if (ms == null) continue;
+        const b = Math.floor(ms / 300000) * 300000;
+        let rec = bucket.get(b);
+        if (!rec) { rec = { sum: 0, n: 0 }; bucket.set(b, rec); }
+        rec.sum += h.median_cents / 100; rec.n++;
+      }
+    }
+    const seq = Array.from(bucket.entries())
+      .map(([t, rec]) => ({ t, v: rec.sum / rec.n }))
+      .sort((a, b) => a.t - b.t);
+    $('#index-value').textContent = '¥' + (cur / 100).toFixed(2);
+    const change = seq.length >= 2 ? (seq[seq.length - 1].v - seq[0].v) / seq[0].v * 100 : 0;
+    const chEl = $('#index-change');
+    chEl.textContent = (change >= 0 ? '+' : '') + change.toFixed(2) + '%';
+    chEl.className = 'index-change ' + (change >= 0 ? 'up' : 'down');
+    $('#index-sub').textContent = `${plans.length} 个计划 · 近6小时`;
+    if (indexChart) indexChart.destroy();
+    if (seq.length >= 2) {
+      indexChart = new Chart($('#index-chart').getContext('2d'), {
+        type: 'line',
+        data: {
+          labels: seq.map((s) => s.t),
+          datasets: [{
+            data: seq.map((s) => s.v),
+            borderColor: '#ffffff', borderWidth: 2, pointRadius: 0,
+            fill: true, backgroundColor: 'rgba(255,255,255,.15)', tension: 0.3,
+          }],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: { legend: { display: false }, tooltip: { enabled: false } },
+          scales: { x: { display: false }, y: { display: false } },
+        },
+      });
+    }
+  } catch {}
+}
+
+// ---- 商家排行榜 ----
+let rankSort = 'sold_count';
+let rankData = [];
+async function loadRank() {
+  const wrap = $('#rank-wrap');
+  try {
+    const r = await api('/api/merchants');
+    rankData = r.merchants || [];
+    $('#rank-hint').textContent = r.updated_at ? '更新于 ' + fmtTime(r.updated_at) + ' · 点击表头排序' : '点击表头排序';
+    renderRankTable();
+  } catch {
+    wrap.innerHTML = '<div class="empty">加载失败</div>';
+  }
+}
+function rankVal(m) {
+  if (rankSort === 'rank') return -m.rank;
+  if (rankSort === 'merchant') return m.display_name || '';
+  if (rankSort === 'plus') { const p = m.plans && m.plans.plus; return p ? p.price_min_cents : -1; }
+  if (rankSort === 'active_rate') { const p = m.plans && m.plans.plus; return p ? p.active_rate_percent : -1; }
+  if (rankSort === 'sold_count') return Object.values(m.plans || {}).reduce((s, p) => s + (p.sold_count || 0), 0);
+  if (rankSort === 'available_count') return Object.values(m.plans || {}).reduce((s, p) => s + (p.available_count || 0), 0);
+  return 0;
+}
+function renderRankTable() {
+  const wrap = $('#rank-wrap');
+  if (!rankData.length) { wrap.innerHTML = '<div class="empty">暂无商家数据</div>'; return; }
+  const sorted = [...rankData].sort((a, b) => {
+    if (rankSort === 'rank') return a.rank - b.rank;
+    const va = rankVal(a), vb = rankVal(b);
+    if (typeof va === 'string') return String(va).localeCompare(String(vb));
+    return (vb || 0) - (va || 0);
+  });
+  const cols = ['rank', 'merchant', 'plus', 'active_rate', 'sold_count', 'available_count'];
+  const labels = { rank: '排名', merchant: '商家', plus: 'Plus最低价', active_rate: '活跃率', sold_count: '总销量', available_count: '在售' };
+  wrap.innerHTML = `
+    <table class="rank-table">
+      <thead><tr>
+        ${cols.map((c) => `<th data-key="${c}" class="${rankSort === c ? 'sorted' : ''}">${labels[c]}</th>`).join('')}
+      </tr></thead>
+      <tbody>
+        ${sorted.map((m, i) => {
+          const plus = m.plans && m.plans.plus;
+          const totalSold = Object.values(m.plans || {}).reduce((s, p) => s + (p.sold_count || 0), 0);
+          const totalAvail = Object.values(m.plans || {}).reduce((s, p) => s + (p.available_count || 0), 0);
+          const ar = plus ? plus.active_rate_percent : null;
+          return `<tr>
+            <td class="rank">${i + 1}</td>
+            <td class="merchant">${escapeHtml(m.display_name)}</td>
+            <td class="num">${plus && plus.price_min_cents ? fmtYuan(plus.price_min_cents) : '—'}</td>
+            <td class="num ${ar != null && ar < 1 ? 'down' : ''}">${ar != null ? ar.toFixed(2) + '%' : '—'}</td>
+            <td class="num">${totalSold}</td>
+            <td class="num">${totalAvail}</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>`;
+  wrap.querySelectorAll('th').forEach((th) => {
+    th.addEventListener('click', () => { rankSort = th.dataset.key; renderRankTable(); });
+  });
 }
 
 // 首次进入分时 tab：为每个 plan 建一整行 K 线卡片

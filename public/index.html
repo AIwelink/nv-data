@@ -232,6 +232,39 @@
     .chart-state { font-size: 12px; color: var(--muted); white-space: nowrap; }
     .chart-wrap { position: relative; height: 420px; }
     .chart-wrap canvas { position: absolute; inset: 0; width: 100% !important; height: 100% !important; }
+    /* 大盘指数 */
+    .index-card {
+      background: linear-gradient(135deg, #0d9488, #0f766e);
+      color: #fff;
+      border-radius: 12px;
+      padding: 16px 20px;
+      margin-bottom: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .index-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+    .index-name { font-size: 13px; opacity: .85; }
+    .index-value { font-size: 28px; font-weight: 700; }
+    .index-change { font-size: 14px; font-weight: 600; padding: 2px 8px; border-radius: 6px; background: rgba(255,255,255,.15); }
+    .index-change.up { color: #ffd7d7; }
+    .index-change.down { color: #d9ffe6; }
+    .index-sub { font-size: 12px; opacity: .7; margin-left: auto; }
+    .index-chart-wrap { height: 70px; }
+    .index-chart-wrap canvas { width: 100% !important; height: 100% !important; }
+    /* 排行榜 */
+    .rank-table { width: 100%; border-collapse: collapse; background: var(--card); border-radius: 10px; overflow: hidden; font-size: 13px; }
+    .rank-table th, .rank-table td { padding: 9px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+    .rank-table th { background: #f9fafb; font-weight: 600; color: var(--muted); white-space: nowrap; cursor: pointer; user-select: none; }
+    .rank-table th:hover { color: var(--text); }
+    .rank-table th.sorted { color: var(--primary); }
+    .rank-table tr:hover td { background: #f9fafb; }
+    .rank-table .rank { font-weight: 700; color: var(--primary); }
+    .rank-table .merchant { font-weight: 600; }
+    .rank-table .bio { color: var(--muted); font-size: 12px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .rank-table .num { font-variant-numeric: tabular-nums; }
+    .rank-table .up { color: var(--up); }
+    .rank-table .down { color: var(--down); }
     @media (max-width: 640px) {
       main { padding: 12px; }
       header { padding: 12px 16px; }
@@ -254,6 +287,7 @@
       <nav class="tabs">
         <button class="tab-btn active" data-tab="overview">看板</button>
         <button class="tab-btn" data-tab="chart">分时走势</button>
+        <button class="tab-btn" data-tab="rank">排行榜</button>
       </nav>
       <div class="status">
         <span id="collect-dot" class="dot"></span>
@@ -262,6 +296,15 @@
       </div>
     </header>
     <main id="tab-overview">
+      <div class="index-card" id="index-card" style="display:none">
+        <div class="index-head">
+          <span class="index-name">号池大盘指数</span>
+          <span class="index-value" id="index-value">—</span>
+          <span class="index-change" id="index-change"></span>
+          <span class="index-sub" id="index-sub"></span>
+        </div>
+        <div class="index-chart-wrap"><canvas id="index-chart"></canvas></div>
+      </div>
       <div class="section-title">平台价格面板</div>
       <div class="board-grid" id="board-grid"></div>
       <div class="section-title">商品</div>
@@ -286,6 +329,12 @@
         </span>
       </div>
       <div class="chart-grid" id="chart-grid"></div>
+    </main>
+    <main id="tab-rank" style="display:none">
+      <div class="section-title">商家排行榜
+        <span class="chart-hint" id="rank-hint"></span>
+      </div>
+      <div id="rank-wrap"><div class="empty">加载中…</div></div>
     </main>
   </div>
 

@@ -117,6 +117,40 @@ app.get('/api/board/events', authMiddleware, (req, res) => {
   res.json({ events: db.getBoardEvents(limit) });
 });
 
+// 商家排行榜（转发 merchant-rankings，5 分钟缓存避免频繁请求平台）
+let merchantsCache = { data: null, at: 0 };
+app.get('/api/merchants', authMiddleware, async (req, res) => {
+  if (merchantsCache.data && Date.now() - merchantsCache.at < 5 * 60 * 1000) {
+    return res.json(merchantsCache.data);
+  }
+  try {
+    const m = await collector.nvtFetch('/api/merchant-rankings');
+    const list = (m.rankings || []).map((r) => ({
+      rank: r.rank,
+      merchant_id: r.merchant_id,
+      display_name: r.display_name,
+      bio_summary: r.bio_summary || '',
+      available_count: r.available_count || 0,
+      plans: Object.fromEntries(
+        Object.entries(r.sale_plan_stats || {}).map(([plan, s]) => [
+          plan,
+          {
+            sold_count: s.sold_count || 0,
+            price_min_cents: s.price_min_cents || 0,
+            price_max_cents: s.price_max_cents || 0,
+            active_rate_percent: s.active_rate_percent || 0,
+            available_count: s.available_count || 0,
+          },
+        ])
+      ),
+    }));
+    merchantsCache = { data: { merchants: list, updated_at: m.updated_at || null }, at: Date.now() };
+    res.json(merchantsCache.data);
+  } catch (e) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
 // 启动
 app.listen(PORT, () => {
   console.log(`[server] 看板启动: http://localhost:${PORT}`);
