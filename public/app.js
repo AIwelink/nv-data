@@ -480,25 +480,32 @@ function aggregateKline(ticks, periodSec) {
     .sort((a, b) => a.timestamp - b.timestamp);
 }
 
-// 最高价 / 中位价 折线指标（叠加主图 candle_pane，细线半透明不盖 K 线）。
+// 最高价 / 中位价 折线指标（一个指标两条线，放独立副图）。
 // 最低价由 K 线实体本身体现，不再单独画折线。
-const STAT_LINE_DEFS = [
-  { name: 'statMed', shortName: '中位', key: 'med', color: 'rgba(13,148,136,0.85)', size: 1.5, style: 'dashed', dashedValue: [4, 3], fn: (k) => k.med },
-  { name: 'statMax', shortName: '最高', key: 'max', color: 'rgba(249,115,22,0.85)', size: 1.5, style: 'solid', dashedValue: [0, 0], fn: (k) => k.max },
-];
+// 放独立副图的原因：若叠加主图会与 K 线共享价格轴，
+// 折线(19-21)会把 Y 轴拉大导致 K 线(12-13)被压缩得很小。
+const STAT_LINES_INDICATOR = {
+  name: 'statLines',
+  shortName: '中位/最高',
+  series: 'price',
+  precision: 2,
+  figures: [
+    { key: 'med', title: '中位: ', type: 'line' },
+    { key: 'max', title: '最高: ', type: 'line' },
+  ],
+  calc: (dataList) => dataList.map((k) => ({ med: k.med, max: k.max })),
+  styles: {
+    lines: [
+      { color: 'rgba(13,148,136,0.9)', size: 1.5, style: 'dashed', dashedValue: [4, 3] },
+      { color: 'rgba(249,115,22,0.9)', size: 1.5, style: 'solid', dashedValue: [0, 0] },
+    ],
+  },
+};
 let statLinesRegistered = false;
 function ensureStatLinesRegistered() {
   if (statLinesRegistered) return;
   statLinesRegistered = true;
-  for (const d of STAT_LINE_DEFS) {
-    klinecharts.registerIndicator({
-      name: d.name, shortName: d.shortName,
-      series: 'price', precision: 2,
-      figures: [{ key: 'v', title: d.shortName + ': ', type: 'line' }],
-      calc: (dataList) => dataList.map((k) => ({ v: d.fn(k) })),
-      styles: { lines: [{ color: d.color, size: d.size, style: d.style, dashedValue: d.dashedValue }] },
-    });
-  }
+  klinecharts.registerIndicator(STAT_LINES_INDICATOR);
 }
 
 // 切换时间跨度
@@ -752,10 +759,9 @@ function createKlineChart(plan) {
   chart.setStyles({
     indicator: { bars: [{ upColor: '#ef4444', downColor: '#16a34a', noChangeColor: '#9ca3af' }] },
   });
-  // 最高价 / 中位价 折线叠加主图（K 线只算最低价，两条统计线作参考）
+  // 最高价 / 中位价 折线放独立副图（不拉伸主图 Y 轴，让 K 线占主图主要空间）
   ensureStatLinesRegistered();
-  chart.createIndicator('statMed', true, { id: 'candle_pane' });
-  chart.createIndicator('statMax', true, { id: 'candle_pane' });
+  chart.createIndicator('statLines');
   return chart;
 }
 
