@@ -458,18 +458,23 @@ function aggregateKline(ticks, periodSec) {
     const min = t.min_cents / 100, med = t.median_cents / 100, max = t.max_cents / 100;
     const lastSold = t.last_sold_at || '';
     let k = map.get(bucket);
-    if (!k) { k = { timestamp: bucket, open: min, close: min, med, maxMax: max, vol: 0, prevLastSold: lastSold }; map.set(bucket, k); }
+    if (!k) { k = { timestamp: bucket, open: min, close: min, minMax: min, minMin: min, med, maxMax: max, vol: 0, prevLastSold: lastSold }; map.set(bucket, k); }
     else {
       // 最近成交时间变化 = 该轮有新成交 → 计 1 笔
       if (lastSold && lastSold !== k.prevLastSold) k.vol += 1;
       if (lastSold) k.prevLastSold = lastSold;
-      k.close = min; k.med = med; if (max > k.maxMax) k.maxMax = max;
+      k.close = min;
+      if (min > k.minMax) k.minMax = min;
+      if (min < k.minMin) k.minMin = min;
+      k.med = med; if (max > k.maxMax) k.maxMax = max;
     }
   }
   return Array.from(map.values())
     .map((k) => ({
       timestamp: k.timestamp, open: k.open, close: k.close,
-      high: Math.max(k.open, k.close), low: Math.min(k.open, k.close),
+      // 针（影线）用最低价自身的波动范围：上针=周期内最低价的最高点，下针=最低价的最低点
+      // （避免用平台 max 挂高价导致影线贯穿全图）
+      high: k.minMax, low: k.minMin,
       med: k.med, max: k.maxMax, volume: k.vol,
     }))
     .sort((a, b) => a.timestamp - b.timestamp);
