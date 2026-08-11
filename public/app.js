@@ -524,7 +524,8 @@ let indexChart = null;
 async function renderIndex() {
   try {
     const r = await api('/api/board');
-    const plans = (r.board || []).filter((p) => p.available && p.median_cents > 0);
+    // 排除低价计划（中位价 <¥1，如 free/grokfree 免费计划），避免拉低大盘指数
+    const plans = (r.board || []).filter((p) => p.available && p.median_cents >= 100);
     if (!plans.length) { $('#index-card').style.display = 'none'; return; }
     $('#index-card').style.display = 'block';
     // 当前指数 = 等权平均各 plan 中位价
