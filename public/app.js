@@ -529,25 +529,34 @@ async function renderIndex() {
     $('#index-card').style.display = 'block';
     // 当前指数 = 等权平均各 plan 中位价
     const cur = plans.reduce((s, p) => s + p.median_cents, 0) / plans.length;
-    // 历史指数：拉各 plan 近 6h，按 5min 桶聚合各 plan 中位价平均
+    // 历史指数：拉各 plan 近 6h，按 5min 桶聚合。
+    // 每桶先算「每个 plan 该桶的平均中位价」，再对所有 plan 等权平均（与当前指数算法一致，
+    // 避免 tick 数多的 plan 权重被放大）
     const histArr = await Promise.all(plans.map((p) =>
       api('/api/board/history?plan=' + encodeURIComponent(p.plan) + '&window=6')
         .then((d) => (d.history || []).filter((h) => h.available && h.median_cents > 0))
         .catch(() => [])
     ));
-    const bucket = new Map();
+    const bucket = new Map(); // 桶 -> Map(plan -> {sum, n})
     for (let i = 0; i < plans.length; i++) {
+      const plan = plans[i].plan;
       for (const h of histArr[i]) {
         const ms = capturedAtToMs(h.captured_at);
         if (ms == null) continue;
         const b = Math.floor(ms / 300000) * 300000;
-        let rec = bucket.get(b);
-        if (!rec) { rec = { sum: 0, n: 0 }; bucket.set(b, rec); }
+        let planMap = bucket.get(b);
+        if (!planMap) { planMap = new Map(); bucket.set(b, planMap); }
+        let rec = planMap.get(plan);
+        if (!rec) { rec = { sum: 0, n: 0 }; planMap.set(plan, rec); }
         rec.sum += h.median_cents / 100; rec.n++;
       }
     }
     const seq = Array.from(bucket.entries())
-      .map(([t, rec]) => ({ t, v: rec.sum / rec.n }))
+      .map(([t, planMap]) => {
+        let total = 0, cnt = 0;
+        for (const rec of planMap.values()) { total += rec.sum / rec.n; cnt++; }
+        return { t, v: cnt ? total / cnt : 0 };
+      })
       .sort((a, b) => a.t - b.t);
     $('#index-value').textContent = '¥' + (cur / 100).toFixed(2);
     const change = seq.length >= 2 ? (seq[seq.length - 1].v - seq[0].v) / seq[0].v * 100 : 0;
