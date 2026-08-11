@@ -393,10 +393,11 @@ $('#modal').addEventListener('click', (e) => { if (e.target === $('#modal')) $('
 
 document.querySelectorAll('.tab-btn').forEach((b) => b.addEventListener('click', () => switchTab(b.dataset.tab)));
 document.querySelectorAll('#range-picker button').forEach((b) => b.addEventListener('click', () => setChartWindow(Number(b.dataset.hours))));
+document.querySelectorAll('#period-picker button').forEach((b) => b.addEventListener('click', () => setKlinePeriod(Number(b.dataset.period))));
 
 // ---- 分时走势（klinecharts K线）----
 let klineWindowHours = 6;         // 当前时间跨度（小时），可由选择器调整
-let klinePeriodSec = 300;         // 当前 K 线聚合周期（秒）
+let klinePeriodSec = 300;         // 当前 K 线聚合周期（秒），可在 1/5/15 分切换
 let klineCharts = {};             // plan -> klinecharts 图表实例
 let klineTicks = {};              // plan -> 全部已加载原始 tick（升序、去重）
 let klineKlines = {};             // plan -> 全部聚合 K 线
@@ -404,8 +405,19 @@ let klineLoading = {};            // plan -> 是否正在加载更早历史
 let klineLoadedAll = {};          // plan -> 已到最早历史
 let chartTimer = null;
 
-// 固定 5 分 K（aicoin 风格）：窗口选择器只改变数据范围，不改变 K 线周期
-function klinePeriod() { return 300; }
+// 切换 K 线周期（1/5/15 分），窗口选择器只改数据范围不改周期
+function setKlinePeriod(periodMin) {
+  klinePeriodSec = periodMin * 60;
+  document.querySelectorAll('#period-picker button').forEach((b) => {
+    b.classList.toggle('active', Number(b.dataset.period) === periodMin);
+  });
+  updateChartHint();
+  rebuildCharts();
+}
+
+function updateChartHint() {
+  $('#chart-hint').textContent = `近 ${klineWindowHours} 小时 · ${klinePeriodSec / 60}分K · 每 10 秒更新`;
+}
 
 // 标准 K 线：不叠加任何自定义折线/指标（最低/中位/最高均通过单根 K 的 OHLC 体现），
 // 符合行业 K 线规范。
@@ -463,11 +475,10 @@ function aggregateKline(ticks, periodSec) {
 // 切换时间跨度
 function setChartWindow(hours) {
   klineWindowHours = hours;
-  klinePeriodSec = klinePeriod();
   document.querySelectorAll('#range-picker button').forEach((b) => {
     b.classList.toggle('active', Number(b.dataset.hours) === hours);
   });
-  $('#chart-hint').textContent = `近 ${hours} 小时 · 5分K · 每 10 秒更新`;
+  updateChartHint();
   // 重建图表（数据范围变化）
   rebuildCharts();
 }
@@ -513,8 +524,7 @@ async function initCharts() {
     const plans = r.board || [];
     if (!plans.length) { grid.innerHTML = '<div class="empty">暂无价格面板数据</div>'; return; }
     grid.innerHTML = '';
-    klinePeriodSec = klinePeriod();
-    $('#chart-hint').textContent = `近 ${klineWindowHours} 小时 · 5分K · 每 10 秒更新`;
+    updateChartHint();
     for (const p of plans) {
       const el = document.createElement('div');
       el.className = 'chart-card';
