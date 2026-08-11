@@ -442,11 +442,12 @@ function mergeTicks(a, b) {
   return Array.from(map.values()).sort((x, y) => capturedAtToMs(x.captured_at) - capturedAtToMs(y.captured_at));
 }
 
-// 原始 tick → 标准 K 线(OHLC) + 成交量(volume)。
-//   open/close 取周期首末均价（实体）  high/low 取均价最高/最低价最低（上下影线）
-//   volume  = 周期内「最近成交时间(last_sold_at)更新」的采集轮次数，作为成交活跃度/成交量。
+// 原始 tick → K 线(OHLC) + 成交量(volume)。
+//   K 线只用「最低价」计算：open/close 取周期首末最低价（实体反映最低价走势），
+//   high/low 取实体上下端点（无影线，避免挂单高价贯穿）
+//   同时记录 med（周期末中位价）/ max（周期内最高价最大）供最高/中位价折线使用
+//   volume = 周期内「最近成交时间(last_sold_at)更新」的采集轮次数（成交活跃度）
 //             (sold_count 累计已售受商家排名变动影响会跳变，差分不可靠，故改用 last_sold_at)
-// 不使用平台 max（挂单高价）做 high，避免影线贯穿；不叠加任何自定义折线。
 function aggregateKline(ticks, periodSec) {
   const period = periodSec * 1000;
   const map = new Map();
@@ -454,23 +455,45 @@ function aggregateKline(ticks, periodSec) {
     const ms = capturedAtToMs(t.captured_at);
     if (ms == null) continue;
     const bucket = Math.floor(ms / period) * period;
-    const avg = t.avg_cents / 100, min = t.min_cents / 100;
+    const min = t.min_cents / 100, med = t.median_cents / 100, max = t.max_cents / 100;
     const lastSold = t.last_sold_at || '';
     let k = map.get(bucket);
-    if (!k) { k = { timestamp: bucket, open: avg, close: avg, low: min, avgMax: avg, vol: 0, prevLastSold: lastSold }; map.set(bucket, k); }
+    if (!k) { k = { timestamp: bucket, open: min, close: min, med, maxMax: max, vol: 0, prevLastSold: lastSold }; map.set(bucket, k); }
     else {
       // 最近成交时间变化 = 该轮有新成交 → 计 1 笔
       if (lastSold && lastSold !== k.prevLastSold) k.vol += 1;
       if (lastSold) k.prevLastSold = lastSold;
-      k.close = avg; if (avg > k.avgMax) k.avgMax = avg; if (min < k.low) k.low = min;
+      k.close = min; k.med = med; if (max > k.maxMax) k.maxMax = max;
     }
   }
   return Array.from(map.values())
     .map((k) => ({
-      timestamp: k.timestamp, open: k.open, close: k.close, high: k.avgMax, low: k.low,
-      volume: k.vol,
+      timestamp: k.timestamp, open: k.open, close: k.close,
+      high: Math.max(k.open, k.close), low: Math.min(k.open, k.close),
+      med: k.med, max: k.maxMax, volume: k.vol,
     }))
     .sort((a, b) => a.timestamp - b.timestamp);
+}
+
+// 最高价 / 中位价 折线指标（叠加主图 candle_pane，细线半透明不盖 K 线）。
+// 最低价由 K 线实体本身体现，不再单独画折线。
+const STAT_LINE_DEFS = [
+  { name: 'statMed', shortName: '中位', key: 'med', color: 'rgba(13,148,136,0.85)', size: 1.5, style: 'dashed', dashedValue: [4, 3], fn: (k) => k.med },
+  { name: 'statMax', shortName: '最高', key: 'max', color: 'rgba(249,115,22,0.85)', size: 1.5, style: 'solid', dashedValue: [0, 0], fn: (k) => k.max },
+];
+let statLinesRegistered = false;
+function ensureStatLinesRegistered() {
+  if (statLinesRegistered) return;
+  statLinesRegistered = true;
+  for (const d of STAT_LINE_DEFS) {
+    klinecharts.registerIndicator({
+      name: d.name, shortName: d.shortName,
+      series: 'price', precision: 2,
+      figures: [{ key: 'v', title: d.shortName + ': ', type: 'line' }],
+      calc: (dataList) => dataList.map((k) => ({ v: d.fn(k) })),
+      styles: { lines: [{ color: d.color, size: d.size, style: d.style, dashedValue: d.dashedValue }] },
+    });
+  }
 }
 
 // 切换时间跨度
@@ -724,6 +747,10 @@ function createKlineChart(plan) {
   chart.setStyles({
     indicator: { bars: [{ upColor: '#ef4444', downColor: '#16a34a', noChangeColor: '#9ca3af' }] },
   });
+  // 最高价 / 中位价 折线叠加主图（K 线只算最低价，两条统计线作参考）
+  ensureStatLinesRegistered();
+  chart.createIndicator('statMed', true, { id: 'candle_pane' });
+  chart.createIndicator('statMax', true, { id: 'candle_pane' });
   return chart;
 }
 
