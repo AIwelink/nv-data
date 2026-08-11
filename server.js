@@ -8,7 +8,7 @@ const collector = require('./collector');
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const WEB_PASSWORD = process.env.WEB_PASSWORD || 'admin';
-const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || '45', 10); // 秒
+const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || '10', 10); // 秒
 
 // 采集状态
 const state = {
@@ -98,9 +98,17 @@ app.get('/api/board/history', authMiddleware, (req, res) => {
   const plan = req.query.plan;
   if (!plan) return res.status(400).json({ error: '缺少 plan' });
   const window = req.query.window; // 小时，可选
-  const history = window
-    ? db.getBoardHistorySince(plan, window)
-    : db.getBoardHistory(plan);
+  const from = req.query.from_ts;  // "YYYY-MM-DD HH:MM:SS" (UTC)，可选，与 to_ts 成对用于范围分页
+  const to = req.query.to_ts;      // 同上
+  const limit = req.query.limit;   // 范围查询时的单页上限
+  let history;
+  if (from || to) {
+    history = db.getBoardHistoryRange(plan, from, to, limit);
+  } else if (window) {
+    history = db.getBoardHistorySince(plan, window);
+  } else {
+    history = db.getBoardHistory(plan);
+  }
   res.json({ history });
 });
 

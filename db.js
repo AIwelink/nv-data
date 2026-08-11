@@ -66,6 +66,8 @@ CREATE TABLE IF NOT EXISTS board_history (
   max_cents   INTEGER NOT NULL DEFAULT 0,
   avg_cents   INTEGER NOT NULL DEFAULT 0,
   available   INTEGER NOT NULL DEFAULT 0,
+  sold_count  INTEGER NOT NULL DEFAULT 0,
+  last_sold_at TEXT DEFAULT '',
   captured_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_board_history ON board_history(plan, captured_at);
@@ -80,6 +82,10 @@ CREATE TABLE IF NOT EXISTS board_events (
 );
 CREATE INDEX IF NOT EXISTS idx_board_events ON board_events(created_at DESC);
 `);
+
+// 兼容旧库：补充新增列（sold_count / last_sold_at）
+try { db.exec('ALTER TABLE board_history ADD COLUMN sold_count INTEGER NOT NULL DEFAULT 0'); } catch {}
+try { db.exec("ALTER TABLE board_history ADD COLUMN last_sold_at TEXT DEFAULT ''"); } catch {}
 
 const upsertProduct = db.prepare(`
   INSERT INTO products (id, name, type_code, type_name, supplier_name, price_cents,
@@ -215,14 +221,14 @@ const upsertBoard = db.prepare(`
 `);
 const getBoardPlan = db.prepare('SELECT * FROM price_board WHERE plan = ?');
 const insertBoardHistory = db.prepare(
-  'INSERT INTO board_history (plan, min_cents, median_cents, max_cents, avg_cents, available) VALUES (?, ?, ?, ?, ?, ?)'
+  'INSERT INTO board_history (plan, min_cents, median_cents, max_cents, avg_cents, available, sold_count, last_sold_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
 );
 const insertBoardEvent = db.prepare(
   'INSERT INTO board_events (plan, kind, from_value, to_value) VALUES (?, ?, ?, ?)'
 );
 
-// 同步价格面板：写当前态 + 时序 + 变更事件
-function syncPriceBoard(plans) {
+// 同步价格面板：写当前态 + 时序（含累计已售 + 最近成交时间，供成交量/活跃度计算）+ 变更事件
+function syncPriceBoard(plans, soldMap = {}, lastSoldAtMap = {}) {
   const tx = db.transaction((list) => {
     let changed = 0;
     for (const p of list) {
@@ -239,10 +245,11 @@ function syncPriceBoard(plans) {
         max_cents: Number(p.max_cents) || 0,
         avg_cents: Number(p.avg_cents) || 0,
         token_count: Number(p.inventory_token_count) || 0,
+        sold_count: Number(soldMap[p.plan]) || 0,
       };
       const prev = getBoardPlan.get(p.plan);
       upsertBoard.run(row);
-      insertBoardHistory.run(row.plan, row.min_cents, row.median_cents, row.max_cents, row.avg_cents, row.available);
+      insertBoardHistory.run(row.plan, row.min_cents, row.median_cents, row.max_cents, row.avg_cents, row.available, row.sold_count, lastSoldAtMap[p.plan] || '');
 
       const prevAvail = prev ? !!prev.available : null;
       const prevMedian = prev ? prev.median_cents : null;
@@ -275,7 +282,7 @@ function getBoard() {
 
 function getBoardHistory(plan, limit = 500) {
   return db.prepare(
-    'SELECT min_cents, median_cents, max_cents, avg_cents, available, captured_at FROM board_history WHERE plan = ? ORDER BY id DESC LIMIT ?'
+    'SELECT min_cents, median_cents, max_cents, avg_cents, available, sold_count, last_sold_at, captured_at FROM board_history WHERE plan = ? ORDER BY id DESC LIMIT ?'
   ).all(plan, limit).reverse();
 }
 
@@ -283,9 +290,21 @@ function getBoardHistory(plan, limit = 500) {
 function getBoardHistorySince(plan, hours, limit = 2000) {
   const h = Math.max(1, Math.min(parseInt(hours, 10) || 6, 24 * 30));
   return db.prepare(
-    `SELECT min_cents, median_cents, max_cents, avg_cents, available, captured_at
+    `SELECT min_cents, median_cents, max_cents, avg_cents, available, sold_count, last_sold_at, captured_at
      FROM board_history WHERE plan = ? AND captured_at >= datetime('now', ?) ORDER BY id ASC LIMIT ?`
   ).all(plan, '-' + h + ' hours', limit);
+}
+
+// 按时间范围返回历史（from/to 为 "YYYY-MM-DD HH:MM:SS" UTC 字符串，与 captured_at 同格式，直接字符串比较）。
+// 供 K 线「拖动加载更早历史」分页使用。
+function getBoardHistoryRange(plan, fromIso, toIso, limit = 50000) {
+  const args = [plan];
+  let sql = 'SELECT min_cents, median_cents, max_cents, avg_cents, available, sold_count, last_sold_at, captured_at FROM board_history WHERE plan = ?';
+  if (fromIso) { sql += ' AND captured_at >= ?'; args.push(fromIso); }
+  if (toIso) { sql += ' AND captured_at <= ?'; args.push(toIso); }
+  sql += ' ORDER BY id ASC LIMIT ?';
+  args.push(Math.min(Math.max(parseInt(limit, 10) || 50000, 1), 200000));
+  return db.prepare(sql).all(...args);
 }
 
 function getBoardEvents(limit = 50) {
@@ -306,5 +325,6 @@ module.exports = {
   getBoard,
   getBoardHistory,
   getBoardHistorySince,
+  getBoardHistoryRange,
   getBoardEvents,
 };

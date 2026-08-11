@@ -207,21 +207,30 @@
     .range-picker button:hover { color: var(--text); }
     .range-picker button.active { background: var(--primary); border-color: var(--primary); color: #fff; }
     .chart-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+      display: flex;
+      flex-direction: column;
       gap: 16px;
     }
     .chart-card {
       background: var(--card); border: 1px solid var(--border);
-      border-radius: 10px; padding: 14px;
+      border-radius: 10px; padding: 14px; width: 100%;
     }
     .chart-card .chart-head {
       display: flex; justify-content: space-between; align-items: center;
-      margin-bottom: 8px;
+      gap: 12px; margin-bottom: 8px; flex-wrap: wrap;
     }
-    .chart-card .chart-name { font-size: 14px; font-weight: 600; }
-    .chart-card .chart-price { font-size: 18px; font-weight: 700; color: var(--primary); }
-    .chart-wrap { position: relative; height: 220px; }
+    .chart-card .chart-name { font-size: 15px; font-weight: 700; }
+    .kline-toggles { display: flex; gap: 14px; font-size: 12px; margin-left: auto; align-items: center; }
+    .kline-toggles label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; user-select: none; color: var(--muted); }
+    .kline-toggles label:hover { color: var(--text); }
+    .kline-toggles input { margin: 0; accent-color: #0d9488; }
+    .kline-toggles .sw { width: 15px; height: 3px; border-radius: 2px; display: inline-block; }
+    .kline-toggles b { color: var(--text); font-weight: 600; }
+    .kline-toggles .tg-min b { color: #2563eb; }
+    .kline-toggles .tg-med b { color: #0d9488; }
+    .kline-toggles .tg-max b { color: #6b7280; }
+    .chart-state { font-size: 12px; color: var(--muted); white-space: nowrap; }
+    .chart-wrap { position: relative; height: 420px; }
     .chart-wrap canvas { position: absolute; inset: 0; width: 100% !important; height: 100% !important; }
     @media (max-width: 640px) {
       main { padding: 12px; }
@@ -285,6 +294,7 @@
   </div>
 
   <script src="/chart.umd.min.js"></script>
+  <script src="/klinecharts.min.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

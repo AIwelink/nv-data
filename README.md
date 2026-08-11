@@ -102,7 +102,7 @@ server {
 | `WEB_PASSWORD` | `admin` | 看板访问口令 |
 | `NVT_COOKIE` | 空 | nvtokens 的 `scm_session` cookie 值（推荐，服务器用） |
 | `NVT_COOKIE_FILE` | `./session-cookie.txt` | cookie 文件路径（本机用） |
-| `POLL_INTERVAL` | `45` | 轮询间隔（秒），默认 45（分时走势用，越短曲线越密） |
+| `POLL_INTERVAL` | `10` | 轮询间隔（秒），默认 10（分时走势 5 分 K 用，注意平台风控） |
 | `HISTORY_RETENTION_DAYS` | `90` | 历史数据保留天数 |
 | `PROXY` | 空 | 如 `http://127.0.0.1:7897`（配了需要 `npm i undici`） |
 
@@ -114,6 +114,7 @@ server {
 - `GET /api/board` — 平台价格面板（各 plan 的 min/p25/median/p75/max/avg + 现货状态）
 - `GET /api/board/history?plan=plus` — 单 plan 价格时序（画历史曲线）
 - `GET /api/board/history?plan=plus&window=6` — 只返回最近 6 小时的数据（分时走势用）
+- `GET /api/board/history?plan=plus&from_ts=2026-08-09 00:00:00&to_ts=2026-08-09 23:59:59&limit=50000` — 按时间范围分页（K 线「拖动加载更早历史」用，`from_ts`/`to_ts` 为 UTC 字符串）
 - `GET /api/board/events?limit=50` — 面板价格/现货变化事件
 - `GET /api/status` — 采集状态（最近轮询、cookie 是否失效）
 - 所有 API 需带请求头 `x-auth-token: <sha256("nvt:"+WEB_PASSWORD)>`（看板前端会自动计算）
@@ -121,10 +122,17 @@ server {
 ## 分时走势面板
 
 看板顶部有两个 tab：**看板** 与 **分时走势**。
-- 分时走势页为每个有现货的 plan 渲染一张实时走势图（近 6 小时），X 轴时间、Y 轴价格
-- 主线 = 中位价，虚线 = 最高价 / 最低价
-- 每 ~20 秒自动刷新一次，随采集数据滚动延伸；采集默认 45 秒一条
+- 每个 plan **占一整行**，渲染一张**标准 K 线图**，红涨绿跌（A股习惯），十字光标显示 时间/开/高/低/收（OHLC）
+- 标准 OHLC：open/close 取周期首末**均价**（实体），high/low 取周期内均价最高 / 最低价最低（上下影线）。不使用平台 max（挂单高价，避免影线贯穿全图）
+- **不叠加任何自定义折线/指标**（最低/中位/最高均通过单根 K 的 OHLC 体现），符合行业 K 线规范
+- 平台无成交量数据，故不显示成交量副图；已关闭每根 K 的高低点价格标签，标价靠十字光标
+- K 线周期按时间跨度自动选择：1/3 小时 → 1 分，6 小时 → 5 分，12/24 小时 → 15 分
+- **滚轮缩放 + 鼠标拖拽平移**（K 线软件交互），拖到最左边界自动加载更早历史（`applyMoreData`，不打断当前视图）
+- 每 ~10 秒采集、~20 秒增量刷新（`updateData`，不重置缩放/平移位置）；固定 5 分 K
+- **成交量副图**（aicoin 风格，主图下方红绿柱）：来自 `merchant-rankings` 的 `last_sold_at`（最近成交时间），5 分成交量 = 周期内成交时间更新的次数（成交活跃度）。平台号池成交稀疏，5 分成交量多为 0 或个位数，属正常
+- 时间轴自动显示日期+时分
 - 历史数据保留 90 天（`HISTORY_RETENTION_DAYS` 可调），重启后曲线仍能回看
+- K 线库使用 [klinecharts](https://github.com/klinecharts/KLineChart)（Apache-2.0，国产专做 K 线），本地化到 `public/`，无需外网 CDN
 
 ## 数据来源
 

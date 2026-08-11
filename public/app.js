@@ -394,22 +394,81 @@ $('#modal').addEventListener('click', (e) => { if (e.target === $('#modal')) $('
 document.querySelectorAll('.tab-btn').forEach((b) => b.addEventListener('click', () => switchTab(b.dataset.tab)));
 document.querySelectorAll('#range-picker button').forEach((b) => b.addEventListener('click', () => setChartWindow(Number(b.dataset.hours))));
 
-// ---- 分时走势 ----
-let chartWindowHours = 6; // 当前时间跨度，可由选择器调整
-let chartCharts = {}; // plan -> Chart 实例
-let chartData = {};   // plan -> 最近数据
-let chartYMin = {};   // plan -> 固定 Y 轴下界(元)
-let chartYMax = {};   // plan -> 固定 Y 轴下界(元)
+// ---- 分时走势（klinecharts K线）----
+let klineWindowHours = 6;         // 当前时间跨度（小时），可由选择器调整
+let klinePeriodSec = 300;         // 当前 K 线聚合周期（秒）
+let klineCharts = {};             // plan -> klinecharts 图表实例
+let klineTicks = {};              // plan -> 全部已加载原始 tick（升序、去重）
+let klineKlines = {};             // plan -> 全部聚合 K 线
+let klineLoading = {};            // plan -> 是否正在加载更早历史
+let klineLoadedAll = {};          // plan -> 已到最早历史
 let chartTimer = null;
+
+// 固定 5 分 K（aicoin 风格）：窗口选择器只改变数据范围，不改变 K 线周期
+function klinePeriod() { return 300; }
+
+// 标准 K 线：不叠加任何自定义折线/指标（最低/中位/最高均通过单根 K 的 OHLC 体现），
+// 符合行业 K 线规范。
+
+// captured_at "YYYY-MM-DD HH:MM:SS" (UTC) → 毫秒时间戳（klinecharts 用毫秒）
+function capturedAtToMs(capturedAt) {
+  const m = String(capturedAt || '').match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})/);
+  if (!m) return null;
+  return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
+}
+
+// 毫秒 → SQLite 时间字符串 "YYYY-MM-DD HH:MM:SS" (UTC)，供后端范围查询
+function msToSqliteUtc(ms) {
+  return new Date(ms).toISOString().slice(0, 19).replace('T', ' ');
+}
+
+// 合并两批 tick，按 captured_at 去重并升序
+function mergeTicks(a, b) {
+  const map = new Map();
+  for (const t of [...a, ...b]) if (t && t.captured_at) map.set(t.captured_at, t);
+  return Array.from(map.values()).sort((x, y) => capturedAtToMs(x.captured_at) - capturedAtToMs(y.captured_at));
+}
+
+// 原始 tick → 标准 K 线(OHLC) + 成交量(volume)。
+//   open/close 取周期首末均价（实体）  high/low 取均价最高/最低价最低（上下影线）
+//   volume  = 周期内「最近成交时间(last_sold_at)更新」的采集轮次数，作为成交活跃度/成交量。
+//             (sold_count 累计已售受商家排名变动影响会跳变，差分不可靠，故改用 last_sold_at)
+// 不使用平台 max（挂单高价）做 high，避免影线贯穿；不叠加任何自定义折线。
+function aggregateKline(ticks, periodSec) {
+  const period = periodSec * 1000;
+  const map = new Map();
+  for (const t of ticks) {
+    const ms = capturedAtToMs(t.captured_at);
+    if (ms == null) continue;
+    const bucket = Math.floor(ms / period) * period;
+    const avg = t.avg_cents / 100, min = t.min_cents / 100;
+    const lastSold = t.last_sold_at || '';
+    let k = map.get(bucket);
+    if (!k) { k = { timestamp: bucket, open: avg, close: avg, low: min, avgMax: avg, vol: 0, prevLastSold: lastSold }; map.set(bucket, k); }
+    else {
+      // 最近成交时间变化 = 该轮有新成交 → 计 1 笔
+      if (lastSold && lastSold !== k.prevLastSold) k.vol += 1;
+      if (lastSold) k.prevLastSold = lastSold;
+      k.close = avg; if (avg > k.avgMax) k.avgMax = avg; if (min < k.low) k.low = min;
+    }
+  }
+  return Array.from(map.values())
+    .map((k) => ({
+      timestamp: k.timestamp, open: k.open, close: k.close, high: k.avgMax, low: k.low,
+      volume: k.vol,
+    }))
+    .sort((a, b) => a.timestamp - b.timestamp);
+}
 
 // 切换时间跨度
 function setChartWindow(hours) {
-  chartWindowHours = hours;
+  klineWindowHours = hours;
+  klinePeriodSec = klinePeriod();
   document.querySelectorAll('#range-picker button').forEach((b) => {
     b.classList.toggle('active', Number(b.dataset.hours) === hours);
   });
-  $('#chart-hint').textContent = `近 ${hours} 小时 · 每 45 秒更新`;
-  // 重新拉数据并重建图表（X 轴宽度变化）
+  $('#chart-hint').textContent = `近 ${hours} 小时 · 5分K · 每 10 秒更新`;
+  // 重建图表（数据范围变化）
   rebuildCharts();
 }
 
@@ -417,9 +476,15 @@ async function rebuildCharts() {
   // 重置已建标记，让 initCharts 重建所有卡片与图表
   const grid = $('#chart-grid');
   grid.dataset.built = '';
-  chartCharts = {};
-  chartYMin = {};
-  chartYMax = {};
+  // 销毁旧图表实例，释放 canvas 与事件监听
+  for (const plan in klineCharts) {
+    try { klinecharts.dispose(klineCharts[plan]); } catch {}
+  }
+  klineCharts = {};
+  klineTicks = {};
+  klineKlines = {};
+  klineLoading = {};
+  klineLoadedAll = {};
   await initCharts();
 }
 
@@ -439,30 +504,28 @@ function switchTab(tab) {
   }
 }
 
-// 首次进入分时 tab：为每个有现货的 plan 建固定尺寸的图表容器
+// 首次进入分时 tab：为每个 plan 建一整行 K 线卡片
 async function initCharts() {
   const grid = $('#chart-grid');
-  if (grid.dataset.built) {
-    updateCharts();
-    return;
-  }
+  if (grid.dataset.built) { updateCharts(); return; }
   try {
     const r = await api('/api/board');
-    const plans = (r.board || []).filter((p) => p.available);
-    if (!plans.length) {
-      grid.innerHTML = '<div class="empty">暂无有现货的价格面板数据</div>';
-      return;
-    }
+    const plans = r.board || [];
+    if (!plans.length) { grid.innerHTML = '<div class="empty">暂无价格面板数据</div>'; return; }
     grid.innerHTML = '';
+    klinePeriodSec = klinePeriod();
+    $('#chart-hint').textContent = `近 ${klineWindowHours} 小时 · 5分K · 每 10 秒更新`;
     for (const p of plans) {
       const el = document.createElement('div');
       el.className = 'chart-card';
       el.innerHTML = `
         <div class="chart-head">
-          <span class="chart-name">${PLAN_LABELS[p.plan] || p.plan}</span>
-          <span class="chart-price" id="chart-price-${p.plan}">—</span>
+          <span class="chart-name">${PLAN_LABELS[p.plan] || p.plan}
+            <span class="lvl-badge ${p.available ? 'high' : 'none'}">${p.available ? '有现货' : '无现货'}</span>
+          </span>
+          <span class="chart-state" id="kline-state-${p.plan}"></span>
         </div>
-        <div class="chart-wrap"><canvas id="chart-canvas-${p.plan}"></canvas></div>
+        <div class="chart-wrap" id="kline-canvas-${p.plan}"></div>
       `;
       grid.appendChild(el);
     }
@@ -473,170 +536,124 @@ async function initCharts() {
   }
 }
 
-// 拉取各 plan 近 N 小时数据并更新图表（图表实例只建一次，之后原地 update）
+// 用 klinecharts 建一张 K 线图（蜡烛 + 十字光标 + 缩放拖拽内置）
+function createKlineChart(plan) {
+  const el = $('#kline-canvas-' + plan);
+  if (!el) return null;
+  const chart = klinecharts.init(el, {
+    locale: 'zh-CN',
+    styles: {
+      grid: { horizontal: { color: '#f3f4f6' }, vertical: { color: '#f3f4f6' } },
+      candle: {
+        bar: {
+          upColor: '#ef4444', downColor: '#16a34a', noChangeColor: '#9ca3af',
+          upBorderColor: '#ef4444', downBorderColor: '#16a34a',
+          upWickColor: '#ef4444', downWickColor: '#16a34a',
+        },
+        // 十字光标 tooltip：只显示时间+OHLC，不显示成交量（平台无成交数据，避免 n/a）
+        tooltip: {
+          custom: [
+            { title: '时间', value: '{time}' },
+            { title: '开盘', value: '{open}' },
+            { title: '最高', value: '{high}' },
+            { title: '最低', value: '{low}' },
+            { title: '收盘', value: '{close}' },
+          ],
+        },
+        // 关闭每根 K 的高低点价格标签（避免标注杂乱，标价靠十字光标）
+        priceMark: {
+          high: { show: false },
+          low: { show: false },
+          last: { show: false },
+        },
+      },
+      xAxis: { axisLine: { color: '#e5e7eb' }, tickText: { color: '#6b7280' } },
+      yAxis: { axisLine: { color: '#e5e7eb' }, tickText: { color: '#6b7280' } },
+      crosshair: {
+        horizontal: { line: { color: '#9ca3af' }, text: { backgroundColor: '#6b7280' } },
+        vertical: { line: { color: '#9ca3af' }, text: { backgroundColor: '#6b7280' } },
+      },
+    },
+  });
+  // 成交量副图（aicoin 风格）：内置 VOL 指标，数据取 KLineData.volume
+  chart.createIndicator('VOL');
+  // 成交量柱：红涨绿跌（对齐 K 线配色）
+  chart.setStyles({
+    indicator: { bars: [{ upColor: '#ef4444', downColor: '#16a34a', noChangeColor: '#9ca3af' }] },
+  });
+  return chart;
+}
+
+// 拉取各 plan 数据并更新图表（首次 applyNewData，之后增量 updateData）
 async function updateCharts() {
-  const canvases = document.querySelectorAll('#tab-chart canvas');
-  if (!canvases.length) return;
-  for (const cv of canvases) {
-    const plan = cv.id.replace('chart-canvas-', '');
+  const wraps = document.querySelectorAll('#tab-chart .chart-wrap[id^="kline-canvas-"]');
+  if (!wraps.length) return;
+  for (const w of wraps) {
+    const plan = w.id.replace('kline-canvas-', '');
     try {
-      const d = await api('/api/board/history?plan=' + encodeURIComponent(plan) + '&window=' + chartWindowHours);
+      const d = await api('/api/board/history?plan=' + encodeURIComponent(plan) + '&window=' + klineWindowHours);
       const hist = (d.history || []).filter((h) => h.available && h.median_cents > 0);
-      chartData[plan] = hist;
-      const priceEl = $('#chart-price-' + plan);
-      if (priceEl && hist.length) {
-        priceEl.textContent = fmtYuan(hist[hist.length - 1].median_cents);
+      if (!hist.length) continue;
+      klineTicks[plan] = mergeTicks(klineTicks[plan] || [], hist);
+      const klines = aggregateKline(klineTicks[plan], klinePeriodSec);
+      let chart = klineCharts[plan];
+      if (!chart) {
+        chart = createKlineChart(plan);
+        if (!chart) continue;
+        klineCharts[plan] = chart;
+        chart.applyNewData(klines, true);
+        attachLoadMore(plan, chart);
+      } else if (klines.length) {
+        // 增量：最后一根有变化才更新（不重置用户缩放/平移位置）
+        const prev = klineKlines[plan] && klineKlines[plan].length ? klineKlines[plan][klineKlines[plan].length - 1] : null;
+        const last = klines[klines.length - 1];
+        if (!prev || prev.timestamp !== last.timestamp || prev.close !== last.close || prev.high !== last.high || prev.volume !== last.volume) {
+          chart.updateData(last);
+        }
       }
-      upsertPlanChart(plan, hist);
+      klineKlines[plan] = klines;
     } catch {}
   }
 }
 
-function fmtShortTime(capturedAt) {
-  // captured_at 格式: YYYY-MM-DD HH:MM:SS (UTC)，转成北京时间(本机时区)显示
-  const m = String(capturedAt || '').match(/^(\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2}):(\d{2})/);
-  if (m) {
-    const [y, mo, d] = m[1].split('-').map(Number);
-    const dt = new Date(Date.UTC(y, mo - 1, d, +m[2], +m[3], +m[4]));
-    return dt.toLocaleString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
-  }
-  return capturedAt || '';
+function setKlineState(plan, text) {
+  const el = $('#kline-state-' + plan);
+  if (el) el.textContent = text || '';
 }
 
-// captured_at "YYYY-MM-DD HH:MM:SS" (UTC) → 毫秒时间戳
-function capturedAtToMs(capturedAt) {
-  const m = String(capturedAt || '').match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})/);
-  if (!m) return null;
-  return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
-}
-
-// 毫秒时间戳 → 北京时间 HH:MM（供 X 轴刻度显示）
-function fmtMsTime(ms) {
-  const d = new Date(ms);
-  if (isNaN(d)) return '';
-  return d.toLocaleString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
-}
-
-// 图表：X 轴为真实时间轴，范围 = [最新时间 - 跨度, 最新时间]
-// 数据点落在真实时间位置，坐标轴标定时间，不随数据点数变化
-function upsertPlanChart(plan, hist) {
-  const canvas = $('#chart-canvas-' + plan);
-  if (!canvas) return;
-  const existing = chartCharts[plan];
-
-  // 确定固定 Y 轴范围：首次按该 plan 历史数据扩 10%，之后保持不变
-  if (!(plan in chartYMin) || chartYMin[plan] == null) {
-    const all = hist.flatMap((h) => [h.min_cents / 100, h.median_cents / 100, h.max_cents / 100]);
-    if (all.length) {
-      let lo = Math.min.apply(null, all);
-      let hi = Math.max.apply(null, all);
-      const pad = (hi - lo || 1) * 0.12;
-      chartYMin[plan] = Math.max(0, +(lo - pad).toFixed(2));
-      chartYMax[plan] = +(hi + pad).toFixed(2);
-    } else {
-      chartYMin[plan] = 0;
-      chartYMax[plan] = 1;
+// 滚到最左边界时加载更早历史（applyMoreData 不改变可见范围）
+function attachLoadMore(plan, chart) {
+  chart.subscribeAction(klinecharts.ActionType.OnVisibleRangeChange, (data) => {
+    const vr = data && data.visibleRange;
+    if (vr && vr.from <= 1 && !klineLoading[plan] && !klineLoadedAll[plan]) {
+      loadOlder(plan, chart);
     }
-  }
-
-  // 时间戳数据点 {x: ms, y: 元}
-  const pts = (hist || [])
-    .map((h) => ({ x: capturedAtToMs(h.captured_at), h }))
-    .filter((p) => p.x != null);
-  const medianData = pts.map((p) => ({ x: p.x, y: p.h.median_cents / 100 }));
-  const maxData = pts.map((p) => ({ x: p.x, y: p.h.max_cents / 100 }));
-  const minData = pts.map((p) => ({ x: p.x, y: p.h.min_cents / 100 }));
-
-  // X 轴时间范围：右端 = 最新数据点时间，左端 = 最新 - 跨度。坐标轴永远标定这个真实时间窗口
-  const latestMs = pts.length ? pts[pts.length - 1].x : Date.now();
-  const spanMs = chartWindowHours * 3600 * 1000;
-  const xMin = latestMs - spanMs;
-  const xMax = latestMs;
-
-  const mkTicks = () => ({
-    maxTicksLimit: 6,
-    font: { size: 10 },
-    color: '#9ca3af',
-    callback: (val) => fmtMsTime(val),
   });
+}
 
-  if (existing) {
-    // 原地更新：换数据点 + 推进时间窗（右端始终最新）
-    existing.data.datasets[0].data = medianData;
-    existing.data.datasets[1].data = maxData;
-    existing.data.datasets[2].data = minData;
-    existing.options.scales.x.min = xMin;
-    existing.options.scales.x.max = xMax;
-    existing.update('none');
-    return;
-  }
-
-  const ctx = canvas.getContext('2d');
-  chartCharts[plan] = new Chart(ctx, {
-    type: 'line',
-    data: {
-      datasets: [
-        {
-          label: '中位价',
-          data: medianData,
-          borderColor: '#0d9488',
-          backgroundColor: 'rgba(13,148,136,.08)',
-          fill: true,
-          borderWidth: 2,
-          pointRadius: pts.length > 40 ? 0 : 1.5,
-          tension: 0.25,
-        },
-        {
-          label: '最高价',
-          data: maxData,
-          borderColor: '#f59e0b',
-          borderWidth: 1,
-          pointRadius: 0,
-          tension: 0.25,
-          borderDash: [4, 3],
-        },
-        {
-          label: '最低价',
-          data: minData,
-          borderColor: '#6366f1',
-          borderWidth: 1,
-          pointRadius: 0,
-          tension: 0.25,
-          borderDash: [4, 3],
-        },
-      ],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: false,
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          mode: 'index',
-          intersect: false,
-          callbacks: {
-            title: (items) => (items.length ? fmtMsTime(items[0].parsed.x) : ''),
-          },
-        },
-      },
-      scales: {
-        x: {
-          type: 'linear',
-          min: xMin,
-          max: xMax,
-          ticks: mkTicks(),
-          grid: { display: false },
-        },
-        y: {
-          min: chartYMin[plan],
-          max: chartYMax[plan],
-          ticks: { font: { size: 10 }, color: '#9ca3af' },
-          grid: { color: '#f3f4f6' },
-        },
-      },
-    },
-  });
+async function loadOlder(plan, chart) {
+  klineLoading[plan] = true;
+  setKlineState(plan, '加载更早…');
+  const ticks = klineTicks[plan] || [];
+  const earliest = ticks.length ? capturedAtToMs(ticks[0].captured_at) : Date.now();
+  const span = Math.max(klineWindowHours, 24) * 3600 * 1000; // 每页至少 24h
+  const fromMs = earliest - span;
+  const toMs = earliest - 1000;
+  try {
+    const d = await api('/api/board/history?plan=' + encodeURIComponent(plan)
+      + '&from_ts=' + encodeURIComponent(msToSqliteUtc(fromMs))
+      + '&to_ts=' + encodeURIComponent(msToSqliteUtc(toMs))
+      + '&limit=200000');
+    const older = (d.history || []).filter((h) => h.available && h.median_cents > 0);
+    if (!older.length) { klineLoadedAll[plan] = true; setKlineState(plan, '已加载全部历史'); return; }
+    klineTicks[plan] = mergeTicks(older, ticks);
+    const klines = aggregateKline(klineTicks[plan], klinePeriodSec);
+    const oldTimes = new Set((klineKlines[plan] || []).map((k) => k.timestamp));
+    const newKlines = klines.filter((k) => !oldTimes.has(k.timestamp));
+    if (newKlines.length) chart.applyMoreData(newKlines, true);
+    klineKlines[plan] = klines;
+    setKlineState(plan, '');
+  } catch {} finally { klineLoading[plan] = false; }
 }
 
 // ---- 启动 ----
