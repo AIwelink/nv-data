@@ -773,11 +773,11 @@ function createKlineChart(plan) {
   chart.setStyles({
     indicator: { bars: [{ upColor: '#ef4444', downColor: '#16a34a', noChangeColor: '#9ca3af' }] },
   });
-  // 最高价 / 中位价 折线放独立副图（不拉伸主图 Y 轴，让 K 线占主图主要空间）
+  // 副图顺序（按重要性）：成交量 → 库存 → 中位/最高折线（次要放最下）
+  // 高度比例：主图260 / 成交量100 / 库存110 / 折线85，整体协调
   ensureStatLinesRegistered();
-  chart.createIndicator('statLines');
-  chart.createIndicator('stockAvail');
-  // 主图（K线）占较大高度，副图（成交量/折线/库存）各 100px
+  chart.createIndicator('stockAvail', false, { height: 110 });
+  chart.createIndicator('statLines', false, { height: 85 });
   chart.setPaneOptions({ id: 'candle_pane', height: 260 });
   return chart;
 }
