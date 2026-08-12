@@ -71,22 +71,23 @@ async function fetchPriceBoard() {
   return data.board || {};
 }
 
-// 采集各 plan 的累计已售 sold_count 与最近成交时间 last_sold_at
-// （从 merchant-rankings 聚合所有商家；sold_count 受商家排名变动影响不可做差分，
-//  用 last_sold_at 的更新做「成交活跃度」更可靠）
+// 采集各 plan 的累计已售 sold_count、最近成交时间 last_sold_at、可售库存 avail_count
+// （从 merchant-rankings 聚合所有商家）
 async function fetchPlanSold() {
   const data = await nvtFetch('/api/merchant-rankings');
   const sold = {};
   const lastSoldAt = {};
+  const avail = {};
   for (const r of data.rankings || []) {
     for (const [plan, stats] of Object.entries(r.sale_plan_stats || {})) {
       sold[plan] = (sold[plan] || 0) + (stats.sold_count || 0);
+      avail[plan] = (avail[plan] || 0) + (stats.available_count || 0);
       if (stats.last_sold_at && (!lastSoldAt[plan] || stats.last_sold_at > lastSoldAt[plan])) {
         lastSoldAt[plan] = stats.last_sold_at;
       }
     }
   }
-  return { sold, lastSoldAt };
+  return { sold, lastSoldAt, avail };
 }
 
 async function runOnce() {
@@ -98,14 +99,14 @@ async function runOnce() {
     }),
     fetchPlanSold().catch((e) => {
       if (e.message === 'AUTH_REQUIRED' || e.message === 'NO_COOKIE') throw e;
-      return { sold: {}, lastSoldAt: {} };
+      return { sold: {}, lastSoldAt: {}, avail: {} };
     }),
   ]);
   const productChanged = db.syncProducts([...marked.values()]);
   db.removeMissingProducts(new Set(marked.keys()));
   let boardChanged = 0;
   if (board && Array.isArray(board.plans)) {
-    boardChanged = db.syncPriceBoard(board.plans, soldInfo.sold, soldInfo.lastSoldAt);
+    boardChanged = db.syncPriceBoard(board.plans, soldInfo.sold, soldInfo.lastSoldAt, soldInfo.avail);
   }
   return { total: marked.size, changed: productChanged, boardChanged };
 }

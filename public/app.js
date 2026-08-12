@@ -92,6 +92,7 @@ function renderBoard(board) {
         <span>中位 <b>${p.available ? fmtYuan(p.median_cents) : '—'}</b></span>
         <span>最高 <b>${p.available ? fmtYuan(p.max_cents) : '—'}</b></span>
         <span>平均 <b>${p.available ? fmtYuan(p.avg_cents) : '—'}</b></span>
+        <span>可售 <b>${p.avail_count != null ? p.avail_count : '—'}</b></span>
         <span>库存token <b>${p.token_count}</b></span>
       </div>
       ${trend}
@@ -457,8 +458,9 @@ function aggregateKline(ticks, periodSec) {
     const bucket = Math.floor(ms / period) * period;
     const min = t.min_cents / 100, med = t.median_cents / 100, max = t.max_cents / 100;
     const lastSold = t.last_sold_at || '';
+    const avail = Number(t.avail_count) || 0;
     let k = map.get(bucket);
-    if (!k) { k = { timestamp: bucket, open: min, close: min, minMax: min, minMin: min, med, maxMax: max, vol: 0, prevLastSold: lastSold }; map.set(bucket, k); }
+    if (!k) { k = { timestamp: bucket, open: min, close: min, minMax: min, minMin: min, med, maxMax: max, vol: 0, prevLastSold: lastSold, avail }; map.set(bucket, k); }
     else {
       // 最近成交时间变化 = 该轮有新成交 → 计 1 笔
       if (lastSold && lastSold !== k.prevLastSold) k.vol += 1;
@@ -467,6 +469,7 @@ function aggregateKline(ticks, periodSec) {
       if (min > k.minMax) k.minMax = min;
       if (min < k.minMin) k.minMin = min;
       k.med = med; if (max > k.maxMax) k.maxMax = max;
+      k.avail = avail;
     }
   }
   return Array.from(map.values())
@@ -476,6 +479,7 @@ function aggregateKline(ticks, periodSec) {
       // （避免用平台 max 挂高价导致影线贯穿全图）
       high: k.minMax, low: k.minMin,
       med: k.med, max: k.maxMax, volume: k.vol,
+      avail: k.avail, // 周期末可售库存
     }))
     .sort((a, b) => a.timestamp - b.timestamp);
 }
@@ -506,6 +510,16 @@ function ensureStatLinesRegistered() {
   if (statLinesRegistered) return;
   statLinesRegistered = true;
   klinecharts.registerIndicator(STAT_LINES_INDICATOR);
+  // 库存副图指标（series normal 独立值轴，数据取 KLineData.avail）
+  klinecharts.registerIndicator({
+    name: 'stockAvail',
+    shortName: '库存',
+    series: 'normal',
+    precision: 0,
+    figures: [{ key: 'v', title: '库存: ', type: 'line' }],
+    calc: (dataList) => dataList.map((k) => ({ v: k.avail })),
+    styles: { lines: [{ color: 'rgba(59,130,246,0.85)', size: 1.5, style: 'solid', dashedValue: [0, 0] }] },
+  });
 }
 
 // 切换时间跨度
@@ -762,6 +776,9 @@ function createKlineChart(plan) {
   // 最高价 / 中位价 折线放独立副图（不拉伸主图 Y 轴，让 K 线占主图主要空间）
   ensureStatLinesRegistered();
   chart.createIndicator('statLines');
+  chart.createIndicator('stockAvail');
+  // 主图（K线）占较大高度，副图（成交量/折线/库存）各 100px
+  chart.setPaneOptions({ id: 'candle_pane', height: 260 });
   return chart;
 }
 

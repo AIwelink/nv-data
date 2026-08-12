@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS price_board (
   max_cents       INTEGER NOT NULL DEFAULT 0,
   avg_cents       INTEGER NOT NULL DEFAULT 0,
   token_count     INTEGER NOT NULL DEFAULT 0,
+  avail_count     INTEGER NOT NULL DEFAULT 0,
   updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -68,6 +69,7 @@ CREATE TABLE IF NOT EXISTS board_history (
   available   INTEGER NOT NULL DEFAULT 0,
   sold_count  INTEGER NOT NULL DEFAULT 0,
   last_sold_at TEXT DEFAULT '',
+  avail_count INTEGER NOT NULL DEFAULT 0,
   captured_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_board_history ON board_history(plan, captured_at);
@@ -83,9 +85,11 @@ CREATE TABLE IF NOT EXISTS board_events (
 CREATE INDEX IF NOT EXISTS idx_board_events ON board_events(created_at DESC);
 `);
 
-// 兼容旧库：补充新增列（sold_count / last_sold_at）
+// 兼容旧库：补充新增列（sold_count / last_sold_at / avail_count）
 try { db.exec('ALTER TABLE board_history ADD COLUMN sold_count INTEGER NOT NULL DEFAULT 0'); } catch {}
 try { db.exec("ALTER TABLE board_history ADD COLUMN last_sold_at TEXT DEFAULT ''"); } catch {}
+try { db.exec('ALTER TABLE board_history ADD COLUMN avail_count INTEGER NOT NULL DEFAULT 0'); } catch {}
+try { db.exec('ALTER TABLE price_board ADD COLUMN avail_count INTEGER NOT NULL DEFAULT 0'); } catch {}
 
 const upsertProduct = db.prepare(`
   INSERT INTO products (id, name, type_code, type_name, supplier_name, price_cents,
@@ -209,26 +213,27 @@ function pruneHistory(days = 90) {
 // ---------- price-board ----------
 const upsertBoard = db.prepare(`
   INSERT INTO price_board (plan, available, inventory_label, inventory_level, min_cents, p25_cents,
-                           median_cents, p75_cents, max_cents, avg_cents, token_count, updated_at)
+                           median_cents, p75_cents, max_cents, avg_cents, token_count, avail_count, updated_at)
   VALUES (@plan, @available, @inventory_label, @inventory_level, @min_cents, @p25_cents,
-          @median_cents, @p75_cents, @max_cents, @avg_cents, @token_count, datetime('now'))
+          @median_cents, @p75_cents, @max_cents, @avg_cents, @token_count, @avail_count, datetime('now'))
   ON CONFLICT(plan) DO UPDATE SET
     available=excluded.available, inventory_label=excluded.inventory_label,
     inventory_level=excluded.inventory_level, min_cents=excluded.min_cents,
     p25_cents=excluded.p25_cents, median_cents=excluded.median_cents,
     p75_cents=excluded.p75_cents, max_cents=excluded.max_cents,
-    avg_cents=excluded.avg_cents, token_count=excluded.token_count, updated_at=datetime('now')
+    avg_cents=excluded.avg_cents, token_count=excluded.token_count,
+    avail_count=excluded.avail_count, updated_at=datetime('now')
 `);
 const getBoardPlan = db.prepare('SELECT * FROM price_board WHERE plan = ?');
 const insertBoardHistory = db.prepare(
-  'INSERT INTO board_history (plan, min_cents, median_cents, max_cents, avg_cents, available, sold_count, last_sold_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  'INSERT INTO board_history (plan, min_cents, median_cents, max_cents, avg_cents, available, sold_count, last_sold_at, avail_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
 );
 const insertBoardEvent = db.prepare(
   'INSERT INTO board_events (plan, kind, from_value, to_value) VALUES (?, ?, ?, ?)'
 );
 
-// 同步价格面板：写当前态 + 时序（含累计已售 + 最近成交时间，供成交量/活跃度计算）+ 变更事件
-function syncPriceBoard(plans, soldMap = {}, lastSoldAtMap = {}) {
+// 同步价格面板：写当前态 + 时序（含库存可售数 avail_count / 累计已售 / 最近成交时间）+ 变更事件
+function syncPriceBoard(plans, soldMap = {}, lastSoldAtMap = {}, availMap = {}) {
   const tx = db.transaction((list) => {
     let changed = 0;
     for (const p of list) {
@@ -246,10 +251,11 @@ function syncPriceBoard(plans, soldMap = {}, lastSoldAtMap = {}) {
         avg_cents: Number(p.avg_cents) || 0,
         token_count: Number(p.inventory_token_count) || 0,
         sold_count: Number(soldMap[p.plan]) || 0,
+        avail_count: Number(availMap[p.plan]) || 0,
       };
       const prev = getBoardPlan.get(p.plan);
       upsertBoard.run(row);
-      insertBoardHistory.run(row.plan, row.min_cents, row.median_cents, row.max_cents, row.avg_cents, row.available, row.sold_count, lastSoldAtMap[p.plan] || '');
+      insertBoardHistory.run(row.plan, row.min_cents, row.median_cents, row.max_cents, row.avg_cents, row.available, row.sold_count, lastSoldAtMap[p.plan] || '', row.avail_count);
 
       const prevAvail = prev ? !!prev.available : null;
       const prevMedian = prev ? prev.median_cents : null;
@@ -282,7 +288,7 @@ function getBoard() {
 
 function getBoardHistory(plan, limit = 500) {
   return db.prepare(
-    'SELECT min_cents, median_cents, max_cents, avg_cents, available, sold_count, last_sold_at, captured_at FROM board_history WHERE plan = ? ORDER BY id DESC LIMIT ?'
+    'SELECT min_cents, median_cents, max_cents, avg_cents, available, sold_count, last_sold_at, avail_count, captured_at FROM board_history WHERE plan = ? ORDER BY id DESC LIMIT ?'
   ).all(plan, limit).reverse();
 }
 
@@ -290,7 +296,7 @@ function getBoardHistory(plan, limit = 500) {
 function getBoardHistorySince(plan, hours, limit = 2000) {
   const h = Math.max(1, Math.min(parseInt(hours, 10) || 6, 24 * 30));
   return db.prepare(
-    `SELECT min_cents, median_cents, max_cents, avg_cents, available, sold_count, last_sold_at, captured_at
+    `SELECT min_cents, median_cents, max_cents, avg_cents, available, sold_count, last_sold_at, avail_count, captured_at
      FROM board_history WHERE plan = ? AND captured_at >= datetime('now', ?) ORDER BY id ASC LIMIT ?`
   ).all(plan, '-' + h + ' hours', limit);
 }
@@ -299,7 +305,7 @@ function getBoardHistorySince(plan, hours, limit = 2000) {
 // 供 K 线「拖动加载更早历史」分页使用。
 function getBoardHistoryRange(plan, fromIso, toIso, limit = 50000) {
   const args = [plan];
-  let sql = 'SELECT min_cents, median_cents, max_cents, avg_cents, available, sold_count, last_sold_at, captured_at FROM board_history WHERE plan = ?';
+  let sql = 'SELECT min_cents, median_cents, max_cents, avg_cents, available, sold_count, last_sold_at, avail_count, captured_at FROM board_history WHERE plan = ?';
   if (fromIso) { sql += ' AND captured_at >= ?'; args.push(fromIso); }
   if (toIso) { sql += ' AND captured_at <= ?'; args.push(toIso); }
   sql += ' ORDER BY id ASC LIMIT ?';
