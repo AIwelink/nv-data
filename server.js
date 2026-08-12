@@ -105,7 +105,7 @@ app.get('/api/board/history', authMiddleware, (req, res) => {
   if (from || to) {
     history = db.getBoardHistoryRange(plan, from, to, limit);
   } else if (window) {
-    history = db.getBoardHistorySince(plan, window);
+    history = db.getBoardHistorySince(plan, window, limit);
   } else {
     history = db.getBoardHistory(plan);
   }

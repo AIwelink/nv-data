@@ -792,7 +792,9 @@ async function updateCharts() {
   for (const w of wraps) {
     const plan = w.id.replace('kline-canvas-', '');
     try {
-      const d = await api('/api/board/history?plan=' + encodeURIComponent(plan) + '&window=' + klineWindowHours);
+      // 7 天窗口数据量大（10s 采集），放大单次拉取上限，否则聚合不出 1d/7d K
+      const limitQ = klineWindowHours >= 168 ? '&limit=100000' : '';
+      const d = await api('/api/board/history?plan=' + encodeURIComponent(plan) + '&window=' + klineWindowHours + limitQ);
       const hist = (d.history || []).filter((h) => h.available && h.median_cents > 0);
       if (!hist.length) continue;
       klineTicks[plan] = mergeTicks(klineTicks[plan] || [], hist);
