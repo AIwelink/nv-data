@@ -88,11 +88,14 @@ function renderBoard(board) {
         <span class="lvl-badge ${lvlClass}">${escapeHtml(lvlLabel)}</span>
       </div>
       <div class="big-price">${p.available ? '<span class="from">最低 </span>' + fmtYuan(p.min_cents) : '暂无现货'}</div>
+      <div class="avail-line ${p.available ? 'on' : 'off'}">
+        <span class="dot"></span>
+        ${p.available ? '在售 <b>' + (p.avail_count != null ? p.avail_count : '—') + '</b>' : '售罄'}
+      </div>
       <div class="price-stats">
         <span>中位 <b>${p.available ? fmtYuan(p.median_cents) : '—'}</b></span>
         <span>最高 <b>${p.available ? fmtYuan(p.max_cents) : '—'}</b></span>
         <span>平均 <b>${p.available ? fmtYuan(p.avg_cents) : '—'}</b></span>
-        <span>可售 <b>${p.avail_count != null ? p.avail_count : '—'}</b></span>
         <span>库存token <b>${p.token_count}</b></span>
       </div>
       ${trend}
